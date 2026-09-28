@@ -37,6 +37,7 @@ static int MacKeyCodeToVK(int code, int *flag)
   switch (code)
   {
     case 51: return VK_BACK;
+    case 64: return VK_F17;
     case 65: return VK_DECIMAL;
     case 67: return VK_MULTIPLY;
     case 69: return VK_ADD;
@@ -44,6 +45,8 @@ static int MacKeyCodeToVK(int code, int *flag)
     case 75: return VK_DIVIDE;
     case 76: *flag |= 1<<24; return VK_RETURN;
     case 78: return VK_SUBTRACT;
+    case 79: return VK_F18;
+    case 80: return VK_F19;
     case 81: return VK_SEPARATOR;
     case 82: return VK_NUMPAD0;
     case 83: return VK_NUMPAD1;
@@ -53,6 +56,7 @@ static int MacKeyCodeToVK(int code, int *flag)
     case 87: return VK_NUMPAD5;
     case 88: return VK_NUMPAD6;
     case 89: return VK_NUMPAD7;
+    case 90: return VK_F20;
     case 91: return VK_NUMPAD8;
     case 92: return VK_NUMPAD9;
     case 96: return VK_F5;
@@ -115,7 +119,7 @@ static int charFromVcode(int keyCode) // used for getting the root char (^, `) f
   if(keyboardLayout)
   {
     UInt32 deadKeyState = 0;
-    UniCharCount maxStringLength = 255;
+    const UniCharCount maxStringLength = 255;
     UniCharCount actualStringLength = 0;
     UniChar unicodeString[maxStringLength];
 
@@ -185,9 +189,14 @@ int SWELL_MacKeyToWindowsKeyEx(void *nsevent, int *flags, int mode)
       }
       else 
       {
-        if (code >= 'a' && code <= 'z') code+='A'-'a';
         if (code == 25 && (flag&FSHIFT)) code=VK_TAB;
-        if (isalnum(code)||code==' ' || code == '\r' || code == '\n' || code ==27 || code == VK_TAB) flag|=FVIRTKEY;
+        if (code >= 'a' && code <= 'z') code+='A'-'a';
+        if ((code >= '0' && code <= '9') ||
+            (code >= 'A' && code <= 'Z') ||
+            code==' ' || code == '\r' || code == '\n' || code ==27 || code == VK_TAB)
+        {
+          flag|=FVIRTKEY;
+        }
       }
     }
   }
@@ -197,8 +206,8 @@ int SWELL_MacKeyToWindowsKeyEx(void *nsevent, int *flags, int mode)
     if (code==8) code='\b';
   }
 
-  if (!(flag&FVIRTKEY)) flag&=~FSHIFT;
-  
+  if (!(flag&FVIRTKEY) && code >= 32 && code < 128) flag&=~FSHIFT;
+
   if (flags) *flags=flag;
   return code;
 }

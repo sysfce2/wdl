@@ -17,7 +17,7 @@ PKG_CONFIG = pkg-config
 
 COMPILER=GCC
 
-CFLAGS = -pipe -fvisibility=hidden -fno-math-errno -fPIC -DPIC -Wall -Wshadow -Wno-unused-function -Wno-multichar -Wtype-limits
+CFLAGS = -pipe -fvisibility=hidden -fno-math-errno -fPIC -DPIC -Wall -Wshadow -Wno-unused-function -Wno-multichar -Wtype-limits -Wno-unused-value -fstrict-aliasing
 
 CFLAGS += -DSWELL_MAKING_DYLIB
 
@@ -43,7 +43,16 @@ else
   CFLAGS +=  -Wno-unused-result
 endif
 
-ifndef ALLOW_WARNINGS
+ifeq ($(COMPILER),GCC)
+  GCC_VER := $(shell $(CXX) --version|head -n 1| sed 's/.* \([0-9][0-9]*\)[.].*/\1/' )
+  GCC_GT_11 := $(shell [ "$(GCC_VER)" -gt 11 ] && echo true )
+  ifeq ($(GCC_GT_11),true)
+    # false positive in gcc 12/13
+    CFLAGS += -Wno-dangling-pointer
+  endif
+endif
+
+ifdef DISALLOW_WARNINGS
   CFLAGS += -Werror
 endif
 ifndef DEPRECATED_WARNINGS
@@ -61,6 +70,9 @@ else
   endif
 endif
 
+ifeq ($(COMPILER),CLANG)
+  CFLAGS += -Wbitwise-instead-of-logical
+endif
 
 ifdef DEBUG
 CFLAGS += -O0 -g -D_DEBUG
@@ -106,24 +118,22 @@ ifndef NOGDK
       CFLAGS += -DSWELL_PRELOAD="libgdk-x11-2.0.so.0"
     endif
   else
-    ifdef SWELL_SUPPORT_GTK
+    ifndef SWELL_GDK_ONLY
       CFLAGS += -DSWELL_TARGET_GDK=3 $(shell $(PKG_CONFIG) --cflags gtk+-3.0) -DSWELL_SUPPORT_GTK
     else
       CFLAGS += -DSWELL_TARGET_GDK=3 $(shell $(PKG_CONFIG) --cflags gdk-3.0)
     endif
     ifndef PRELOAD_GDK
-      ifdef SWELL_SUPPORT_GTK
+      ifndef SWELL_GDK_ONLY
         LINKEXTRA += $(shell $(PKG_CONFIG) --libs gtk+-3.0)
       else
         LINKEXTRA += $(shell $(PKG_CONFIG) --libs gdk-3.0)
       endif
     else
       LINKEXTRA += -lX11 -lXi
-      ifdef SWELL_SUPPORT_GTK
-        CFLAGS += -DSWELL_PRELOAD="libgtk+-3.so.0"
-      else
-        CFLAGS += -DSWELL_PRELOAD="libgdk-3.so.0"
-      endif
+      CFLAGS += -DSWELL_PRELOAD="libgtk-3.so.0"
+      CFLAGS += -DSWELL_PRELOAD2="libgtk+-3.so.0"
+      CFLAGS += -DSWELL_PRELOAD3="libgdk-3.so.0"
     endif
   endif
   CFLAGS += -DSWELL_LICE_GDI

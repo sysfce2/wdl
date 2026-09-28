@@ -84,10 +84,9 @@ class LICE_CachedFont : public LICE_IFont
 
   protected:
 
-    virtual bool DrawGlyph(LICE_IBitmap *bm, unsigned short c, int xpos, int ypos, const RECT *clipR);
     int DrawTextImpl(LICE_IBitmap *bm, const char *str, int strcnt, RECT *rect, UINT dtFlags); // cause swell defines DrawText to SWELL_DrawText etc
 
-    bool RenderGlyph(unsigned short idx);
+    bool RenderGlyph(unsigned int idx);
 
     const char *NextWordBreak(const char *str, int strcnt, int w);
 
@@ -106,7 +105,8 @@ class LICE_CachedFont : public LICE_IFont
       int charid; // used by m_extracharlist
       int left_extra;
     };
-    charEnt *findChar(unsigned short c);
+    charEnt *findChar(unsigned int c);
+    virtual bool DrawGlyph(LICE_IBitmap *bm, const charEnt *ch, int xpos, int ypos, const RECT *clipR);
 
     charEnt m_lowchars[128]; // first 128 chars cached here
     WDL_TypedBuf<charEnt> m_extracharlist;
@@ -242,9 +242,6 @@ public:
       LOGFONT lf = m_lf;
       lf.lfHeight = ht;
       lf.lfWidth = ht2;
-      #ifdef _WIN32
-      if (!(m_flags & LICE_FONT_FLAG_FORCE_NATIVE) && abs(lf.lfHeight) <= 14) lf.lfQuality = NONANTIALIASED_QUALITY;
-      #endif
       t->cache->SetFromHFont(CreateFontIndirect(&lf), LICE_FONT_FLAG_OWNS_HFONT | use_flag);
     }
 

@@ -49,6 +49,29 @@ bool swell_is_likely_capslock; // only used when processing dit events for a-zA-
 SWELL_OSWINDOW SWELL_focused_oswindow; // top level window which has focus (might not map to a HWND__!)
 HWND swell_captured_window;
 
+#ifdef SWELL_SUPPORT_GTK
+bool swell_ime_enabled;
+extern void (*swell_gtk_im_context_focus_in)(GtkIMContext *);
+extern void (*swell_gtk_im_context_focus_out)(GtkIMContext *);
+extern void (*swell_gtk_im_context_get_preedit_string)(GtkIMContext *, gchar **, PangoAttrList **, gint *);
+extern GtkIMContext *(*swell_gtk_im_multicontext_new)(void);
+extern void (*swell_gtk_im_context_set_cursor_location)(GtkIMContext *, const GdkRectangle *);
+extern void (*swell_gtk_im_context_set_client_window)(GtkIMContext *context, GdkWindow *window);
+GtkIMContext *swell_ime_context;
+HWND swell_ime_target;
+static int swell_ime_preedit_state;
+static gchar *swell_ime_preedit_str;
+static void ime_commit_cb(GtkIMContext *im_context, const gchar *str, gpointer user_data);
+static void ime_preedit_changed_cb(GtkIMContext *im_context, gpointer user_data);
+static void ime_preedit_end_cb(GtkIMContext *im_context, gpointer user_data);
+
+static bool swell_im_preedit_paint(struct __SWELL_editControlState *es, HWND hwnd,
+                             int &sel1, int &sel2, int &cursor_pos,
+                             WDL_FastString *title_out); // returns true if title_out should be used
+static int swell_im_hwnd_want(HWND hwnd); // returns 1 if edit, 2 if combo, 3 for generic
+#endif
+
+
 #define STATEIMAGEMASKTOINDEX(x) (((x)>>16)&0xff)
 
 static bool swell_is_virtkey_char(int c)
@@ -160,6 +183,14 @@ static HWND s_last_rbuttondown;
 
 HWND__::~HWND__()
 {
+#ifdef SWELL_SUPPORT_GTK
+  if (this == swell_ime_target)
+  {
+    if (swell_ime_context) swell_gtk_im_context_focus_out(swell_ime_context);
+    swell_ime_target = NULL;
+  }
+#endif
+
   if (m_wndproc)
     m_wndproc(this,WM_NCDESTROY,0,0);
 
@@ -667,6 +698,8 @@ void SetWindowPos(HWND hwnd, HWND zorder, int x, int y, int cx, int cy, int flag
  // todo: handle SWP_SHOWWINDOW
   RECT f = hwnd->m_position;
   int reposflag = 0;
+  WDL_ASSERT((flags & SWP_NOSIZE) || cx>=0);
+  WDL_ASSERT((flags & SWP_NOSIZE) || cy>=0);
   if (!(flags&SWP_NOZORDER))
   {
     if (hwnd->m_parent && zorder != hwnd)
@@ -1019,11 +1052,12 @@ BOOL GetDlgItemText(HWND hwnd, int idx, char *text, int textlen)
   return true;
 }
 
-void CheckDlgButton(HWND hwnd, int idx, int check)
+BOOL CheckDlgButton(HWND hwnd, int idx, int check)
 {
   hwnd = GetDlgItem(hwnd,idx);
-  if (WDL_NOT_NORMALLY(!hwnd)) return;
+  if (WDL_NOT_NORMALLY(!hwnd)) return FALSE;
   SendMessage(hwnd,BM_SETCHECK,check,0);
+  return TRUE;
 }
 
 
@@ -1164,6 +1198,9 @@ static bool m_sizetofits;
 
 void SWELL_MakeSetCurParms(float xscale, float yscale, float xtrans, float ytrans, HWND parent, bool doauto, bool dosizetofit)
 {
+  if (xscale == 0.0) xscale = SWELL_DEF_DLGSCALE2;
+  if (yscale == 0.0) yscale = SWELL_DEF_DLGSCALE2;
+
   if (g_swell_ui_scale != 256 && xscale != 1.0f && yscale != 1.0f)
   {
     const float m = g_swell_ui_scale/256.0f;
@@ -1777,8 +1814,8 @@ int swell_getLineLength(const char *buf, int *post_skip, int wrap_maxwid, HDC hd
     int x=0,best_len=0,sumw=0;
     for (;;)
     {
-      while (x < lb && buf[x] > 0 && isspace(buf[x])) x++;
-      while (x < lb && (buf[x]<0 || !isspace(buf[x]))) x++;
+      while (x < lb && buf[x] > 0 && isspace_safe(buf[x])) x++;
+      while (x < lb && (buf[x]<0 || !isspace_safe(buf[x]))) x++;
       const int thisw = editMeasureLineLength(hdc,buf+best_len,x-best_len);
       if (thisw+sumw > wrap_maxwid) break;
       sumw+=thisw;
@@ -1839,7 +1876,7 @@ struct __SWELL_editControlState
   void onMouseDown(int &capmode_state, int last_cursor);
   void onMouseDrag(int &capmode_state, int p);
 
-  void autoScrollToOffset(HWND hwnd, int charpos, bool is_multiline, bool word_wrap);
+  void autoScrollToOffset(HWND hwnd, int charpos, bool is_multiline, bool word_wrap, int right_pad=0);
 };
 
 
@@ -1887,7 +1924,7 @@ static bool editGetCharPos(HDC hdc, const char *str, int singleline_len, int cha
       lb = *use_cache++;
       if (WDL_NOT_NORMALLY(lb < 1)) break;
     }
-    if (bytepos < lb+pskip)
+    if (bytepos < lb+pskip || (!str[lb+pskip] && (lb+pskip<1 || str[lb+pskip-1] != '\n')))
     { 
       pt->x=editMeasureLineLength(hdc,str,bytepos);
       pt->y=ypos;
@@ -2088,7 +2125,7 @@ void __SWELL_editControlState::onMouseDrag(int &capmode_state, int p)
     }
 }
 
-void __SWELL_editControlState::autoScrollToOffset(HWND hwnd, int charpos, bool is_multiline, bool word_wrap)
+void __SWELL_editControlState::autoScrollToOffset(HWND hwnd, int charpos, bool is_multiline, bool word_wrap, int right_pad)
 {
     if (!hwnd) return;
     HDC hdc = GetDC(hwnd);
@@ -2102,6 +2139,7 @@ void __SWELL_editControlState::autoScrollToOffset(HWND hwnd, int charpos, bool i
       tmp.right -= g_swell_ctheme.scrollbar_width;
       if (!word_wrap) tmp.bottom -= g_swell_ctheme.scrollbar_width;
     }
+    tmp.right -= right_pad;
 
     int wwrap = word_wrap?tmp.right:0;
     POINT pt={0,};
@@ -2130,7 +2168,7 @@ void __SWELL_editControlState::autoScrollToOffset(HWND hwnd, int charpos, bool i
 
 static bool is_word_char(char c)
 {
-  return c<0/*all utf-8 chars are word chars*/ || isalnum(c) || c == '_';
+  return c<0/*all utf-8 chars are word chars*/ || isalnum_safe(c) || c == '_';
 }
 
 static int scanWord(const char *buf, int bytepos, int dir)
@@ -2161,6 +2199,7 @@ static int scanWord(const char *buf, int bytepos, int dir)
 static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, 
     bool wantReturn, bool isMultiLine, __SWELL_editControlState *es, bool isEditCtl)
 {
+  const int style = isEditCtl ? hwnd->m_style : ES_AUTOHSCROLL;
   if (lParam & (FCONTROL|FALT|FLWIN))
   {
     if (lParam == (FVIRTKEY | FCONTROL))
@@ -2171,7 +2210,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
         int slen = es->getSelection(&hwnd->m_title,&s);
         if (slen > 0 && s)
         {
-          if (!isEditCtl || !(hwnd->m_style & ES_PASSWORD))
+          if (!(style & ES_PASSWORD))
           {
             OpenClipboard(hwnd);
             HANDLE h = GlobalAlloc(0,slen+1);
@@ -2182,7 +2221,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
               SetClipboardData(CF_TEXT,h);
             }
             CloseClipboard();
-            if (h && wParam == 'X' && (!isEditCtl || !(hwnd->m_style & ES_READONLY)))
+            if (h && wParam == 'X' && !(style & ES_READONLY))
             {
               es->deleteSelection(&hwnd->m_title);
               return 7;
@@ -2190,7 +2229,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
           }
         }
       }
-      else if (wParam == 'V' && !(hwnd->m_style & ES_READONLY))
+      else if (wParam == 'V' && !(style & ES_READONLY))
       {
         OpenClipboard(hwnd);
         HANDLE h = GetClipboardData(CF_TEXT);
@@ -2203,7 +2242,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
             es->deleteSelection(&hwnd->m_title);
             int bytepos = utf8fs_charpos_to_bytepos(&hwnd->m_title,es->cursor_pos);
             hwnd->m_title.Insert(s,bytepos);
-            if (!(hwnd->m_style&ES_MULTILINE))
+            if (!(style&ES_MULTILINE))
             {
               char *p = (char *)hwnd->m_title.Get() + bytepos;
               char *ep = p + strlen(s);
@@ -2245,7 +2284,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
         }
       }
 
-      if (hwnd->m_style & ES_READONLY) return 1;
+      if (style & ES_READONLY) return 1;
 
       char b[8];
       WDL_MakeUTFChar(b,wParam,sizeof(b));
@@ -2273,7 +2312,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
           const int line_h = DrawText(hdc," ",1,&tmp,DT_SINGLELINE|DT_NOPREFIX|DT_CALCRECT);
           POINT pt;
           GetClientRect(hwnd,&tmp);
-          const int wwrap = (hwnd->m_style & ES_AUTOHSCROLL) ? 0 : tmp.right - g_swell_ctheme.scrollbar_width;
+          const int wwrap = (style & ES_AUTOHSCROLL) ? 0 : tmp.right - g_swell_ctheme.scrollbar_width;
           if (editGetCharPos(hdc, hwnd->m_title.Get(), -1, es->cursor_pos, line_h, &pt, wwrap, isEditCtl ? es : NULL, hwnd))
           {
             if (wParam == VK_UP) pt.y -= line_h/2;
@@ -2304,7 +2343,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
         const char *buf = hwnd->m_title.Get();
         int lpos = 0, wwrap=0;
         HDC hdc=NULL;
-        if (!(hwnd->m_style & ES_AUTOHSCROLL))
+        if (!(style & ES_AUTOHSCROLL))
         {
           hdc = GetDC(hwnd);
           RECT r;
@@ -2368,7 +2407,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
       }
     return 3;
     case VK_DELETE:
-      if (hwnd->m_style & ES_READONLY) return 1;
+      if (style & ES_READONLY) return 1;
       if (hwnd->m_title.GetLength())
       {
         if (es->deleteSelection(&hwnd->m_title)) return 7;
@@ -2384,7 +2423,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
     return 1;
 
     case VK_BACK:
-      if (hwnd->m_style & ES_READONLY) return 1;
+      if (style & ES_READONLY) return 1;
       if (hwnd->m_title.GetLength())
       {
         if (es->deleteSelection(&hwnd->m_title)) return 7;
@@ -2406,7 +2445,7 @@ static LRESULT OnEditKeyDown(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
     case VK_RETURN:
       if (wantReturn)
       {
-        if (hwnd->m_style & ES_READONLY) return 1;
+        if (style & ES_READONLY) return 1;
         if (es->deleteSelection(&hwnd->m_title)) return 7;
         int bytepos = utf8fs_charpos_to_bytepos(&hwnd->m_title,es->cursor_pos);
         hwnd->m_title.Insert("\r\n",bytepos);
@@ -2817,12 +2856,17 @@ again:
           r.left+=2 - es->scroll_x; r.right-=2;
 
           const bool do_cursor = es->cursor_state!=0;
-          const int cursor_pos = focused ?  utf8fs_charpos_to_bytepos(title,es->cursor_pos) : -1;
-          const int sel1 = es->sel1>=0 && focused ? utf8fs_charpos_to_bytepos(title,es->sel1) : -1;
-          const int sel2 = es->sel2>=0 && focused ? utf8fs_charpos_to_bytepos(title,es->sel2) : -1;
+          int cursor_pos = focused ?  utf8fs_charpos_to_bytepos(title,es->cursor_pos) : -1;
+          int sel1 = es->sel1>=0 && focused ? utf8fs_charpos_to_bytepos(title,es->sel1) : -1;
+          int sel2 = es->sel2>=0 && focused ? utf8fs_charpos_to_bytepos(title,es->sel2) : -1;
 
           const bool multiline = (hwnd->m_style & ES_MULTILINE) != 0;
 
+#ifdef SWELL_SUPPORT_GTK
+          WDL_FastString tmp_im;
+          if (swell_im_preedit_paint(es, hwnd, sel1, sel2, cursor_pos, &tmp_im))
+            title = &tmp_im;
+#endif
           if (multiline)
           {
             r.top+=2 - es->scroll_y;
@@ -3011,9 +3055,29 @@ again:
     return 0;
     case WM_KILLFOCUS:
       SendMessage(GetParent(hwnd),WM_COMMAND,(EN_KILLFOCUS<<16) | (hwnd->m_id&0xffff),(LPARAM)hwnd);
+      InvalidateRect(hwnd,NULL,FALSE);
+    break;
     case WM_SETFOCUS:
       InvalidateRect(hwnd,NULL,FALSE);
     break;
+#ifdef SWELL_SUPPORT_GTK
+    case WM_CHAR:
+      if (es && !(hwnd->m_style & ES_READONLY))
+      {
+        char b[8];
+        WDL_MakeUTFChar(b, wParam, sizeof(b));
+        es->deleteSelection(&hwnd->m_title);
+        int bytepos = utf8fs_charpos_to_bytepos(&hwnd->m_title, es->cursor_pos);
+        hwnd->m_title.Insert(b, bytepos);
+        es->cursor_pos++;
+        bool is_multiline = (hwnd->m_style & ES_MULTILINE) != 0;
+        bool is_word_wrap = (hwnd->m_style & (ES_MULTILINE|ES_AUTOHSCROLL)) == ES_MULTILINE;
+        es->autoScrollToOffset(hwnd, es->cursor_pos, is_multiline, is_word_wrap);
+        InvalidateRect(hwnd, NULL, FALSE);
+        SendMessage(GetParent(hwnd), WM_COMMAND, (EN_CHANGE << 16) | (hwnd->m_id & 0xffff), (LPARAM)hwnd);
+      }
+      return 0;
+#endif
   }
   return DefWindowProc(hwnd,msg,wParam,lParam);
 }
@@ -3329,18 +3393,30 @@ static LRESULT WINAPI labelWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
               if (text[0])
               {
                 RECT tmp={0,};
-                const int line_h = DrawText(ps.hdc," ",1,&tmp,DT_SINGLELINE|DT_NOPREFIX|DT_CALCRECT|f);
-                if (r.bottom > line_h*5/3)
+                const bool has_nl = !!strchr(text,'\n');
+                const int line_h = DrawText(ps.hdc,has_nl ? " " : text,-1,&tmp,DT_SINGLELINE|DT_NOPREFIX|DT_CALCRECT|f);
+                if (r.bottom > line_h*5/3 && (tmp.right > r.right-r.left || has_nl))
                 {
-                  int loffs=0;
-                  while (text[loffs] && r.top < r.bottom)
+                  // tall label that doesn't fit text as a single line:
+                  // first pass, measure height of wrapped text, second pass draw the text vertically centered
+                  for (int pass = 0; pass < 2; pass ++)
                   {
-                    int post=0, lb=swell_getLineLength(text+loffs, &post, r.right, ps.hdc);
-                    if (lb>0)
-                      DrawText(ps.hdc,text+loffs,lb,&r,DT_TOP|DT_SINGLELINE|DT_LEFT|f);
-                    r.top += line_h;
-                    loffs+=lb+post;
+                    int loffs = 0, ypos = r.top;
+                    while (text[loffs] && ypos < r.bottom)
+                    {
+                      int post=0, lb=swell_getLineLength(text+loffs, &post, r.right, ps.hdc);
+                      if (lb>0 && pass)
+                      {
+                        r.top = ypos;
+                        DrawText(ps.hdc,text+loffs,lb,&r,DT_TOP|DT_SINGLELINE|DT_LEFT|f);
+                      }
+                      ypos += line_h;
+                      loffs+=lb+post;
+                    }
+                    if (!pass && ypos < r.bottom)
+                      r.top += (r.bottom-ypos)/2; // vertical center
                   }
+
                   text = "";
                 }
               }
@@ -3391,7 +3467,7 @@ struct __SWELL_ComboBoxInternalState_rec
   ~__SWELL_ComboBoxInternalState_rec() { free(desc); } 
   char *desc; 
   LPARAM parm; 
-  static int cmp(const __SWELL_ComboBoxInternalState_rec **a, const __SWELL_ComboBoxInternalState_rec **b) { return strcmp((*a)->desc, (*b)->desc); }
+  static int cmpfunc(const __SWELL_ComboBoxInternalState_rec *a, const __SWELL_ComboBoxInternalState_rec *b) { return strcmp(a->desc, b->desc); }
 };
 
 class __SWELL_ComboBoxInternalState
@@ -3407,8 +3483,8 @@ class __SWELL_ComboBoxInternalState
 
 static LRESULT WINAPI comboWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
-  static const int buttonwid = 16; // used in edit combobox
-  static int s_capmode_state;
+  static const int buttonwid = 16;
+  static int s_capmode_state; // extended state 100, means "set sel1/sel2 to cursor_pos on drag"
   __SWELL_ComboBoxInternalState *s = (__SWELL_ComboBoxInternalState*)hwnd->m_private_data;
   if (msg >= CB_ADDSTRING && msg <= CB_INITSTORAGE)
   {
@@ -3428,7 +3504,7 @@ static LRESULT WINAPI comboWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             __SWELL_ComboBoxInternalState_rec *r=new __SWELL_ComboBoxInternalState_rec((const char *)lParam);
             // find position of insert for wParam
             bool m;
-            int idx = s->items.LowerBound(r,&m,__SWELL_ComboBoxInternalState_rec::cmp);
+            int idx = s->items.LowerBound(r,&m,__SWELL_ComboBoxInternalState_rec::cmpfunc);
             if (s->selidx >= idx) s->selidx++;
             s->items.Insert(idx,r);
             return idx;
@@ -3582,7 +3658,11 @@ static LRESULT WINAPI comboWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
           ReleaseDC(hwnd,hdc);
 
+          const int oldsel1 = s->editstate.sel1, oldsel2 = s->editstate.sel2;
           SetFocus(hwnd);
+
+          if (oldsel1 != s->editstate.sel1 || oldsel2 != s->editstate.sel2)
+            s_capmode_state = 100;
         }
         SetCapture(hwnd);
       }
@@ -3591,7 +3671,7 @@ static LRESULT WINAPI comboWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     case WM_MOUSEMOVE:
       if (GetCapture()==hwnd)
       {
-        if (s_capmode_state == 3 || s_capmode_state == 4)
+        if (s_capmode_state == 3 || s_capmode_state == 4 || s_capmode_state == 100)
         {
           const bool multiline = (hwnd->m_style & ES_MULTILINE) != 0;
           int xo=3;
@@ -3604,8 +3684,14 @@ static LRESULT WINAPI comboWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
               );
           ReleaseDC(hwnd,hdc);
 
+          if (s_capmode_state==100)
+          {
+            if (p == s->editstate.cursor_pos) return 0;
+            s_capmode_state=4;
+            s->editstate.sel1 = s->editstate.sel2 = s->editstate.cursor_pos;
+          }
           s->editstate.onMouseDrag(s_capmode_state,p);
-          s->editstate.autoScrollToOffset(hwnd,p,false,false);
+          s->editstate.autoScrollToOffset(hwnd,p,false,false, SWELL_UI_SCALE(buttonwid+2));
 
           InvalidateRect(hwnd,NULL,FALSE);
         }
@@ -3663,7 +3749,7 @@ popupMenu:
       {
         if (s) s->selidx=-1; // lookup from text?
         SendMessage(GetParent(hwnd),WM_COMMAND,(CBN_EDITCHANGE<<16) | (hwnd->m_id&0xffff),(LPARAM)hwnd);
-        s->editstate.autoScrollToOffset(hwnd,s->editstate.cursor_pos,false,false);
+        s->editstate.autoScrollToOffset(hwnd,s->editstate.cursor_pos,false,false, SWELL_UI_SCALE(buttonwid+2));
         InvalidateRect(hwnd,NULL,FALSE);
         return 0;
       }
@@ -3743,17 +3829,28 @@ popupMenu:
           }
 
           r.left+=SWELL_UI_SCALE(3);
-          r.right-=SWELL_UI_SCALE(3);
 
           if ((hwnd->m_style & CBS_DROPDOWNLIST) != CBS_DROPDOWNLIST)
           {
-            r.right -= SWELL_UI_SCALE(buttonwid+2);
-            editControlPaintLine(ps.hdc, hwnd->m_title.Get(), hwnd->m_title.GetLength(),
+            WDL_FastString *title = &hwnd->m_title;
+            int sel1 = focused ? s->editstate.sel1 : -1;
+            int sel2 = focused ? s->editstate.sel2 : -1;
+            if (sel1>0) sel1 = utf8fs_charpos_to_bytepos(title, sel1);
+            if (sel2>0) sel2 = utf8fs_charpos_to_bytepos(title, sel2);
+            r.right -= SWELL_UI_SCALE(buttonwid+5);
+            r.left -= s->editstate.scroll_x;
+#ifdef SWELL_SUPPORT_GTK
+            WDL_FastString tmp;
+            if (swell_im_preedit_paint(&s->editstate, hwnd, sel1, sel2, cursor_pos, &tmp))
+              title = &tmp;
+#endif
+            editControlPaintLine(ps.hdc, title->Get(), title->GetLength(),
                 s->editstate.cursor_state!=0 ? cursor_pos : -1,
-                focused ? s->editstate.sel1 : -1, focused ? s->editstate.sel2 : -1, &r, DT_VCENTER);
+                sel1, sel2, &r, DT_VCENTER);
           }
           else
           {
+            r.right -= SWELL_UI_SCALE(buttonwid-1);
             char buf[512];
             buf[0]=0;
             GetWindowText(hwnd,buf,sizeof(buf));
@@ -3793,7 +3890,7 @@ popupMenu:
         if (!s->editstate.sel1 && s->editstate.sel2 == -1)
           s->editstate.sel2 = WDL_utf8_get_charlen(hwnd->m_title.Get());
         if (s->editstate.sel2>=0)
-          s->editstate.autoScrollToOffset(hwnd,s->editstate.sel2, false, false);
+          s->editstate.autoScrollToOffset(hwnd,s->editstate.sel2, false, false, SWELL_UI_SCALE(buttonwid+2));
         InvalidateRect(hwnd,NULL,FALSE);
       }
     return 0;
@@ -3828,7 +3925,29 @@ popupMenu:
       }
 
     return 0;
+#ifdef SWELL_SUPPORT_GTK
+    case WM_CHAR:
+      if (s && (hwnd->m_style & CBS_DROPDOWNLIST) != CBS_DROPDOWNLIST &&
+          !(hwnd->m_style & ES_READONLY)) {
+        char b[8];
+        WDL_MakeUTFChar(b, wParam, sizeof(b));
+        s->editstate.deleteSelection(&hwnd->m_title);
+        int bytepos = utf8fs_charpos_to_bytepos(&hwnd->m_title, s->editstate.cursor_pos);
+        hwnd->m_title.Insert(b, bytepos);
+        s->editstate.cursor_pos++;
+        bool is_multiline = (hwnd->m_style & ES_MULTILINE) != 0;
+        bool is_word_wrap = (hwnd->m_style & (ES_MULTILINE|ES_AUTOHSCROLL)) == ES_MULTILINE;
+        s->editstate.autoScrollToOffset(hwnd, s->editstate.cursor_pos, is_multiline, is_word_wrap);
+        InvalidateRect(hwnd, NULL, FALSE);
+        SendMessage(GetParent(hwnd), WM_COMMAND,
+                    (CBN_EDITCHANGE << 16) | (hwnd->m_id & 0xffff),
+                    (LPARAM)hwnd);
+      }
+      return 0;
+#endif
     case WM_SETFOCUS:
+      SendMessage(hwnd,EM_SETSEL,0,-1); // comboboxes get their text selected on focus
+    WDL_FALLTHROUGH;
     case WM_KILLFOCUS:
       InvalidateRect(hwnd,NULL,FALSE);
     break;
@@ -4120,11 +4239,11 @@ struct listViewState
   WDL_PtrList<HGDIOBJ__> *m_status_imagelist;
   int m_status_imagelist_type;
 
-  static int compareRows(const SWELL_ListView_Row **_a, const SWELL_ListView_Row **_b)
+  static int compareRows(const SWELL_ListView_Row *_a, const SWELL_ListView_Row *_b)
   {
     const char *a, *b;
-    if (!_a || !(a=(*_a)->get_col_txt(0))) a="";
-    if (!_b || !(b=(*_b)->get_col_txt(0))) b="";
+    if (!(a=_a->get_col_txt(0))) a="";
+    if (!(b=_b->get_col_txt(0))) b="";
     return strcmp(a,b);
   }
 };
@@ -4177,6 +4296,7 @@ static LRESULT listViewWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
   static POINT s_clickpt;
   switch (msg)
   {
+    case WM_MOUSEHWHEEL:
     case WM_MOUSEWHEEL:
       if ((GetAsyncKeyState(VK_CONTROL)&0x8000) || (GetAsyncKeyState(VK_MENU)&0x8000)) break; // pass modified mousewheel to parent
 
@@ -4184,7 +4304,7 @@ static LRESULT listViewWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         const int amt = ((short)HIWORD(wParam))/40;
         if (amt && lvs)
         {
-          if (GetAsyncKeyState(VK_SHIFT)&0x8000)
+          if ((GetAsyncKeyState(VK_SHIFT) ^ (msg==WM_MOUSEHWHEEL?0x8000:0))&0x8000)
           {
             const int oldscroll = lvs->m_scroll_x;
             lvs->m_scroll_x -= amt*4;
@@ -4381,6 +4501,12 @@ static LRESULT listViewWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         {
           NMLISTVIEW nm={{hwnd,hwnd->m_id,msg == WM_LBUTTONDBLCLK ? NM_DBLCLK : NM_CLICK},hit,lvs->GetColumnIndex(subitem),0,0,0, {s_clickpt.x, s_clickpt.y }};
           SendMessage(GetParent(hwnd),WM_NOTIFY,hwnd->m_id,(LPARAM)&nm);
+          if (hit >= 0 && hit < n)
+          {
+            lvs->m_capmode_state = LISTVIEW_CAP_DRAG;
+            lvs->m_capmode_data1 = hit;
+            lvs->m_capmode_data2 = subitem;
+          }
           return 0;
         }
 
@@ -4697,7 +4823,8 @@ forceMouseMove:
               }
               else 
               {
-                bool changed = lvs->clear_sel() | lvs->set_sel(offs,true);
+                bool changed = lvs->clear_sel();
+                if (lvs->set_sel(offs,true)) changed = true;
                 lvs->m_selitem = offs;
 
                 if (lvs->m_is_listbox)
@@ -4949,6 +5076,7 @@ forceMouseMove:
                 RECT ar = { xpos,ypos, cr.right, ypos + row_height };
                 if ((!col || has_subitem_image) && has_image)
                 {
+                  ar.left += row_height/4;
                   if (image_idx>0)
                   {
                     HICON icon = lvs->m_status_imagelist->Get(image_idx-1);
@@ -4961,15 +5089,8 @@ forceMouseMove:
                       DrawImageInRect(ps.hdc,icon,&ar);
                     }
                   }
-                  if (has_status_image)
-                  {
-                    xpos += row_height;
-                    ar.left += row_height;
-                  }
-                  else if (image_idx > 0)
-                  {
-                    ar.left += row_height;
-                  }
+                  ar.left += row_height;
+                  if (has_status_image) xpos += row_height;
                 }
 
                 if (lvs->m_is_listbox && (hwnd->m_style & LBS_OWNERDRAWFIXED))
@@ -4995,7 +5116,7 @@ forceMouseMove:
 
                   if (ar.right > ar.left && str)
                   {
-                    const int adj = (ar.right-ar.left)/16;
+                    const int adj = (ar.right-ar.left)/4;
                     const int maxadj = SWELL_UI_SCALE(4);
                     int fmt = ncols > 0 ? cols[col].fmt & 3 : LVCFMT_LEFT;
                     if (fmt != LVCFMT_LEFT)
@@ -6745,7 +6866,7 @@ int ListView_HitTest(HWND h, LVHITTESTINFO *pinf)
 
   if (x < 0) pinf->flags |= LVHT_TOLEFT;
   if (x >= r.right) pinf->flags |= LVHT_TORIGHT;
-  if (y < 0) pinf->flags |= LVHT_ABOVE;
+  if (y < lvs->GetColumnHeaderHeight(h)) pinf->flags |= LVHT_ABOVE;
   if (y >= r.bottom) pinf->flags |= LVHT_BELOW;
 
   if (!pinf->flags && lvs->m_last_row_height)
@@ -7252,6 +7373,14 @@ LRESULT SwellDialogDefaultWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM
         }
       }
     }
+    if (uMsg == WM_CTLCOLORSTATIC)
+    {
+      // some calling code (not in swell) may expect to be able to query the text color/brush
+      SetTextColor((HDC)wParam, g_swell_ctheme.label_text);
+      static HBRUSH br;
+      if (!br) br = CreateSolidBrush(g_swell_ctheme._3dface);
+      return (LRESULT)br;
+    }
   }
   return DefWindowProc(hwnd,uMsg,wParam,lParam);
 }
@@ -7268,7 +7397,7 @@ static HFONT menubar_font;
 static bool wantRightAlignedMenuBarItem(const char *p)
 {
   char c = *p;
-  return c > 0 && c != '&' && !isalnum(c);
+  return c > 0 && c != '&' && !isalnum_safe(c);
 }
 
 #define MENUBAR_SELECTED_ITEM_XPAD \
@@ -7440,7 +7569,7 @@ LRESULT DefWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         if (dc)
         {
           if (!menubar_font) 
-            menubar_font = CreateFont(g_swell_ctheme.menubar_font_size,0,0,0,FW_NORMAL,0,0,0,0,0,0,0,0,g_swell_deffont_face);
+            menubar_font = CreateFont(-wdl_abs(g_swell_ctheme.menubar_font_size),0,0,0,FW_NORMAL,0,0,0,0,0,0,0,0,g_swell_deffont_face);
 
           RECT r;
           GetWindowContentViewRect(hwnd,&r);
@@ -7611,7 +7740,7 @@ LRESULT DefWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                   p++;
                 }
               }
-              if (*p > 0 && (WPARAM)toupper(*p) == wParam)
+              if (*p > 0 && (WPARAM)toupper_safe(*p) == wParam)
               {
                 if (inf->hSubMenu)
                 {
@@ -7657,6 +7786,53 @@ LRESULT DefWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         return 0;
 
+    case WM_KILLFOCUS:
+#ifdef SWELL_SUPPORT_GTK
+      if (swell_ime_context && hwnd == swell_ime_target)
+      {
+        swell_gtk_im_context_focus_out(swell_ime_context);
+        swell_gtk_im_context_set_client_window(swell_ime_context, 0);
+        swell_ime_target = NULL;
+      }
+#endif
+    break;
+    case WM_SETFOCUS:
+#ifdef SWELL_SUPPORT_GTK
+      if (hwnd != swell_ime_target)
+      {
+        if (swell_ime_context && swell_ime_target) swell_gtk_im_context_focus_out(swell_ime_context);
+        swell_ime_target = NULL;
+
+        if (swell_im_hwnd_want(hwnd))
+        {
+          static bool one_try;
+          if (!swell_ime_context && swell_gtk_im_multicontext_new && !one_try)
+          {
+            one_try = true;
+            swell_ime_context = swell_gtk_im_multicontext_new();
+            if (swell_ime_context)
+            {
+              g_signal_connect(swell_ime_context, "commit", G_CALLBACK(ime_commit_cb), NULL);
+              g_signal_connect(swell_ime_context, "preedit-changed", G_CALLBACK(ime_preedit_changed_cb), NULL);
+              g_signal_connect(swell_ime_context, "preedit-end", G_CALLBACK(ime_preedit_end_cb), NULL);
+            }
+          }
+
+          if (swell_ime_context)
+          {
+            HWND h = hwnd;
+            while (h && !h->m_oswindow) h=h->m_parent;
+            if (h && h->m_oswindow)
+            {
+              swell_ime_target = hwnd;
+              swell_gtk_im_context_set_client_window(swell_ime_context, h->m_oswindow);
+              swell_gtk_im_context_focus_in(swell_ime_context);
+            }
+          }
+        }
+      }
+#endif
+    break;
   }
   return 0;
 }
@@ -8364,8 +8540,33 @@ BOOL EnumChildWindows(HWND hwnd, BOOL (*cwEnumFunc)(HWND,LPARAM),LPARAM lParam)
   }
   return TRUE;
 }
+
 void SWELL_GetDesiredControlSize(HWND hwnd, RECT *r)
 {
+  if (WDL_NOT_NORMALLY(!hwnd)) return;
+  bool isbutton = !stricmp(hwnd->m_classname,"Button") &&
+    !(hwnd->m_style & BS_GROUPBOX);
+  bool isstatic = !isbutton && !stricmp(hwnd->m_classname,"Static");
+
+  if (isbutton || isstatic)
+  {
+    const int sf = hwnd->m_style & 0xf;
+    const bool ischk = isbutton && (sf == BS_AUTO3STATE ||
+                                    sf == BS_AUTOCHECKBOX ||
+                                    sf == BS_AUTORADIOBUTTON);
+    const int chksz = SWELL_UI_SCALE(12 + 6);
+
+    RECT r2 = {0,};
+    HDC hdc = GetDC(hwnd);
+    DrawText(hdc,hwnd->m_title.Get(),-1,&r2,DT_CALCRECT);
+    ReleaseDC(hwnd,hdc);
+    if (isbutton)
+     r->right = r2.right + SWELL_UI_SCALE(6) + (ischk ? chksz : 0);
+    else if (isstatic)
+     r->right = r2.right + SWELL_UI_SCALE(4);
+    r->bottom = r2.bottom;
+  }
+
 }
 
 BOOL SWELL_IsGroupBox(HWND hwnd)
@@ -8384,7 +8585,7 @@ BOOL SWELL_IsStaticText(HWND hwnd)
 
 BOOL ShellExecute(HWND hwndDlg, const char *action,  const char *content1, const char *content2, const char *content3, int blah)
 {
-  const char *xdg = "/usr/bin/xdg-open";
+  const char *xdg = "xdg-open";
   const char *argv[3] = { NULL };
   char *tmp=NULL;
 
@@ -8434,7 +8635,7 @@ BOOL ShellExecute(HWND hwndDlg, const char *action,  const char *content1, const
   if (pid == 0) 
   {
     for (int x=0;argv[x];x++) argv[x] = strdup(argv[x]);
-    execv(argv[0],(char *const*)argv);
+    execvp(argv[0],(char *const*)argv);
     exit(0); // if execv fails for some reason
   }
   free(tmp);
@@ -8452,10 +8653,11 @@ static LRESULT WINAPI focusRectWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         PAINTSTRUCT ps;
         if (BeginPaint(hwnd,&ps))
         {
+          extern int *g_swell_focusrect_color;
           RECT r;
           GetClientRect(hwnd,&r);
-          HBRUSH br = CreateSolidBrushAlpha(g_swell_ctheme.focusrect,0.5f);
-          HPEN pen = CreatePen(0,PS_SOLID,g_swell_ctheme.focusrect);
+          HBRUSH br = CreateSolidBrushAlpha(g_swell_focusrect_color ? *g_swell_focusrect_color : g_swell_ctheme.focusrect,0.5f);
+          HPEN pen = CreatePen(0,PS_SOLID,g_swell_focusrect_color ? *g_swell_focusrect_color : g_swell_ctheme.focusrect);
           HGDIOBJ oldbr = SelectObject(ps.hdc,br);
           HGDIOBJ oldpen = SelectObject(ps.hdc,pen);
           Rectangle(ps.hdc,0,0,r.right,r.bottom);
@@ -8698,5 +8900,163 @@ LRESULT SWELL_SendMouseMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
 
   return ret;
 }
+
+#ifdef SWELL_SUPPORT_GTK
+static int swell_im_hwnd_want(HWND hwnd)
+{
+  if (!swell_ime_enabled || !hwnd || !hwnd->m_classname) return 0;
+  if (GetProp(hwnd,"SWELL_IME_ENABLE")) return 3;
+  if (!strcmp(hwnd->m_classname,"Edit")) return GetProp(hwnd,"SWELL_IME_DISABLE") ? 0 : 1;
+  if (!strcmp(hwnd->m_classname,"combobox")) return GetProp(hwnd,"SWELL_IME_DISABLE") ? 0 : 2;
+  return 0;
+}
+
+static void ime_commit_cb(GtkIMContext *im_context, const gchar *str, gpointer user_data)
+{
+  HWND hwnd = swell_ime_target;
+  if (!hwnd) return;
+
+  const char *p = str;
+  while (*p)
+  {
+    int codepoint = 0;
+    int charlen = wdl_utf8_parsechar(p, &codepoint);
+    if (charlen < 1)
+      break;
+    SendMessage(hwnd, WM_CHAR, (WPARAM)codepoint, 1);
+    p += charlen;
+  }
+}
+
+static void ime_preedit_changed_cb(GtkIMContext *im_context, gpointer user_data)
+{
+  if (!swell_gtk_im_context_get_preedit_string) return;
+
+  HWND hwnd = swell_ime_target;
+
+  gchar *preedit_text = NULL;
+  PangoAttrList *attrs = NULL;
+  gint cursor_pos = 0;
+  swell_gtk_im_context_get_preedit_string(im_context, &preedit_text, &attrs, &cursor_pos);
+
+  swell_ime_preedit_state = preedit_text && *preedit_text ? 1 : 0;
+  g_free(swell_ime_preedit_str);
+  swell_ime_preedit_str = preedit_text;
+  if (preedit_text && *preedit_text) InvalidateRect(hwnd, NULL, FALSE);
+
+  if (attrs) pango_attr_list_unref(attrs);
+}
+
+static void ime_preedit_end_cb(GtkIMContext *im_context, gpointer user_data) // If the preedit is finished
+{
+  HWND hwnd = swell_ime_target;
+  if (!hwnd) return;
+
+  swell_ime_preedit_state=0;
+  g_free(swell_ime_preedit_str);
+  swell_ime_preedit_str=NULL;
+  InvalidateRect(hwnd, NULL, FALSE);
+}
+
+void swell_im_update_candidates_location()
+{
+  if (!swell_gtk_im_context_set_cursor_location || !swell_ime_context || !swell_ime_target) return;
+
+  HWND hwnd = GetFocus();
+  if (hwnd != swell_ime_target) return;
+
+  HWND client_hwnd = hwnd;
+  while (client_hwnd && !client_hwnd->m_oswindow) client_hwnd = client_hwnd->m_parent;
+  if (!client_hwnd) return;
+
+  const int type = swell_im_hwnd_want(hwnd);
+  __SWELL_editControlState *es = NULL;
+  if (type == 2)
+    es = &((__SWELL_ComboBoxInternalState*)hwnd->m_private_data)->editstate;
+  else if (type == 1)
+    es = (__SWELL_editControlState*)hwnd->m_private_data;
+
+  RECT hwnd_r, client_r;
+  GetWindowRect(hwnd, &hwnd_r);
+  GetWindowContentViewRect(client_hwnd, &client_r);
+
+  int x = hwnd_r.left - client_r.left, y = hwnd_r.top - client_r.top;
+
+  int cursor_pos = es ? es->cursor_pos : 0;
+  if (es && es->sel1 == 0 && es->sel2>0) cursor_pos = 0;
+
+  HDC hdc = GetDC(hwnd);
+  if (hdc)
+  {
+    RECT tmp = { 0, };
+    const int line_h = DrawText(hdc, " ", 1, &tmp, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    if (es && cursor_pos > 0)
+    {
+      const bool multiline = type == 1 && (hwnd->m_style & ES_MULTILINE) != 0;
+      const int wwrap = (hwnd->m_style & ES_AUTOHSCROLL) ? 0 :
+                            hwnd->m_position.right - hwnd->m_position.left - g_swell_ctheme.scrollbar_width;
+      POINT pt = {0, 0};
+      int singleline_len = multiline ? -1 : hwnd->m_title.GetLength();
+
+      if (editGetCharPos(hdc, hwnd->m_title.Get(), singleline_len, cursor_pos, line_h, &pt, wwrap, es, hwnd))
+      {
+        x += pt.x;
+        y += pt.y;
+      }
+    }
+    y += line_h;
+    ReleaseDC(hwnd, hdc);
+  }
+  GdkRectangle preedit_area = {x, y, 0, 0};
+  swell_gtk_im_context_set_cursor_location(swell_ime_context, &preedit_area);
+}
+
+static bool swell_im_preedit_paint(__SWELL_editControlState *es, HWND hwnd, int &sel1, int &sel2, int &cursor_pos, WDL_FastString *title_out)
+{
+  if (!hwnd || swell_ime_target != hwnd || !swell_ime_context) return false;
+  if (!swell_ime_preedit_str) return false;
+
+  cursor_pos = wdl_clamp(cursor_pos, 0, hwnd->m_title.GetLength());
+
+  const char *preedit_text = (const char *)swell_ime_preedit_str;
+  const int preedit_byte_len = preedit_text ? strlen(preedit_text) : 0;
+  const int preedit_len = preedit_text ? WDL_utf8_get_charlen(preedit_text) : 0;
+  int scroll_pos = 0;
+  const bool is_multiline = (hwnd->m_style & ES_MULTILINE) != 0;
+  const bool is_word_wrap = (hwnd->m_style & (ES_MULTILINE | ES_AUTOHSCROLL)) == ES_MULTILINE;
+  if (sel1 == sel2)
+  {
+    if (cursor_pos > 0)
+      title_out->Set(hwnd->m_title.Get(), cursor_pos);
+    else
+      title_out->Set("");
+    if (preedit_text) title_out->Append(preedit_text);
+    title_out->Append(hwnd->m_title.Get() + cursor_pos);
+    sel1 = cursor_pos;
+    cursor_pos += preedit_byte_len;
+    sel2 = cursor_pos;
+    scroll_pos = es->cursor_pos + preedit_len;
+  }
+  else if (sel2 > sel1)
+  {
+    if (WDL_NOT_NORMALLY(sel1 < 0 || sel2 > hwnd->m_title.GetLength())) return false;
+    if (sel1 > 0)
+      title_out->Set(hwnd->m_title.Get(), sel1);
+    else title_out->Set("");
+    if (preedit_text) title_out->Append(preedit_text);
+    title_out->Append(hwnd->m_title.Get() + sel2);
+    cursor_pos = sel2 = sel1 + preedit_byte_len;
+    scroll_pos = es->sel1 + preedit_len;
+  }
+  else
+    title_out->Set(hwnd->m_title.Get());
+
+  title_out->SwapContentsWith(&hwnd->m_title);
+  es->autoScrollToOffset(hwnd, scroll_pos, is_multiline, is_word_wrap);
+  title_out->SwapContentsWith(&hwnd->m_title);
+
+  return true;
+}
+#endif
 
 #endif

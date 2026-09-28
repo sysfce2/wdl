@@ -157,7 +157,7 @@ HFONT SWELL_GetDefaultFont()
 }
 
 
-HFONT CreateFontIndirect(LOGFONT *lf)
+HFONT CreateFontIndirect(const LOGFONT *lf)
 {
   return CreateFont(lf->lfHeight, lf->lfWidth,lf->lfEscapement, lf->lfOrientation, lf->lfWeight, lf->lfItalic, 
                     lf->lfUnderline, lf->lfStrikeOut, lf->lfCharSet, lf->lfOutPrecision,lf->lfClipPrecision, 
@@ -361,25 +361,10 @@ void SWELL_LineTo(HDC ctx, int x, int y)
   c->lastpos_y=fy;
 }
 
-void PolyPolyline(HDC ctx, POINT *pts, DWORD *cnts, int nseg)
+void PolyPolyline(HDC ctx, const POINT *pts, const DWORD *cnts, int nseg)
 {
-  HDC__ *c=(HDC__ *)ctx;
-  if (!HDC_VALID(c)||!HGDIOBJ_VALID(c->curpen,TYPE_PEN)||c->curpen->wid<0||nseg<1) return;
-
-  while (nseg-->0)
-  {
-    DWORD cnt=*cnts++;
-    if (!cnt) continue;
-    if (!--cnt) { pts++; continue; }
-    
-    pts++;
-    
-    while (cnt--)
-    {
-      pts++;
-    }
-  }
 }
+
 void *SWELL_GetCtxGC(HDC ctx)
 {
   HDC__ *ct=(HDC__ *)ctx;
@@ -415,6 +400,10 @@ BOOL GetTextMetrics(HDC ctx, TEXTMETRIC *tm)
 int DrawText(HDC ctx, const char *buf, int buflen, RECT *r, int align)
 {
   WDL_ASSERT((align & DT_SINGLELINE) || !(align & (DT_VCENTER | DT_BOTTOM)));
+  // if DT_CALCRECT and DT_WORDBREAK, rect must be provided
+  WDL_ASSERT((align&(DT_CALCRECT|DT_WORDBREAK)) != (DT_CALCRECT|DT_WORDBREAK) ||
+    (r && r->right > r->left && r->bottom > r->top));
+
   HDC__ *ct=(HDC__ *)ctx;
   if (!HDC_VALID(ct)) return 0;
   if (r && (align&DT_CALCRECT)) 
@@ -575,7 +564,7 @@ HBITMAP CreateBitmap(int width, int height, int numplanes, int bitsperpixel, uns
   return NULL;
 }
 
-HICON CreateIconIndirect(ICONINFO* iconinfo)
+HICON CreateIconIndirect(const ICONINFO* iconinfo)
 {
   return NULL;
 }
@@ -722,19 +711,19 @@ void swell_load_color_theme(const char *fn)
       char *p = buf;
       while (*p == ' ' || *p == '\t') p++;
       char *np = p;
-      while (*np > 0 && (*np == '_' || isalnum(*np))) np++;
+      while (*np > 0 && (*np == '_' || isalnum_safe(*np))) np++;
       if (!*np || np == p) continue;
       *np++ = 0;
       while (*np == ' ' || *np == '\t') np++;
 
       if(!stricmp(p,"default_font_face"))
       {
-        if (*np > 0 && !isspace(*np))
+        if (*np > 0 && !isspace_safe(*np))
         {
           char *b = strdup(np);
           g_swell_deffont_face = b;
           while (*b && *b != ';' && *b != '#') b++;
-          while (b>g_swell_deffont_face && b[-1] > 0 && isspace(b[-1])) b--;
+          while (b>g_swell_deffont_face && b[-1] > 0 && isspace_safe(b[-1])) b--;
           *b=0;
         }
         continue;

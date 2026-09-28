@@ -70,6 +70,11 @@ class WDL_String
   #endif
 
     const char *Get() const { return m_hb.GetSize()?(char*)m_hb.Get():""; }
+    const char *GetAtOffs(int offs) const {
+      const int l = GetLength();
+      if (WDL_NOT_NORMALLY(offs < 0 || offs > l)) return Get()+l;
+      return Get()+offs;
+    }
 
   #ifdef WDL_STRING_FASTSUB_DEFINED
     int GetLength() const { int a = m_hb.GetSize(); return a>0?a-1:0; }
@@ -94,14 +99,16 @@ class WDL_String
     int GetLength() const { return m_hb.GetSize()?(int)strlen((const char*)m_hb.Get()):0; }
   #endif
 
-    explicit WDL_String(int hbgran) : m_hb(hbgran WDL_HEAPBUF_TRACEPARM("WDL_String(4)")) { }
-    explicit WDL_String(const char *initial=NULL, int initial_len=0) : m_hb(128 WDL_HEAPBUF_TRACEPARM("WDL_String"))
+    explicit WDL_String(int hbgran) : m_hb(hbgran) { }
+    explicit WDL_String(const char *initial=NULL, int initial_len=0) : m_hb(128)
     {
       if (initial) Set(initial,initial_len);
     }
-    WDL_String(const WDL_String &s) : m_hb(128 WDL_HEAPBUF_TRACEPARM("WDL_String(2)")) { Set(&s); }
-    WDL_String(const WDL_String *s) : m_hb(128 WDL_HEAPBUF_TRACEPARM("WDL_String(3)")) { if (s && s != this) Set(s); }
+    WDL_String(const WDL_String &s) : m_hb(128) { Set(&s); }
+    WDL_String(const WDL_String *s) : m_hb(128) { if (s && s != this) Set(s); }
     ~WDL_String() { }
+
+    void SwapContentsWith(WDL_String *b) { m_hb.SwapContentsWith(&b->m_hb); }
 #endif // ! WDL_STRING_IMPL_ONLY
 
 #ifndef WDL_STRING_INTF_ONLY

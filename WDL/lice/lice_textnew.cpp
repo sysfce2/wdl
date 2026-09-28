@@ -23,25 +23,33 @@ static char __1ifNT2if98=0; // 2 for iswin98
 #endif
 
 
-static int utf8makechar(char *ptrout, unsigned short charIn)
+static int utf8makechar(char *ptrout, unsigned int charIn)
 {
   unsigned char *pout = (unsigned char *)ptrout;
   if (charIn < 128) { *pout = (unsigned char)charIn; return 1; }
   if (charIn < 2048) { pout[0] = 0xC0 + (charIn>>6); pout[1] = 0x80 + (charIn&0x3f); return 2; }
-  pout[0] = 0xE0 + (charIn>>12);
-  pout[1] = 0x80 + ((charIn>>6)&0x3f);
-  pout[2] = 0x80 + (charIn&0x3f);
-  return 3;
+  if (charIn < 65536)
+  {
+    pout[0] = 0xE0 + (charIn>>12);
+    pout[1] = 0x80 + ((charIn>>6)&0x3f);
+    pout[2] = 0x80 + (charIn&0x3f);
+    return 3;
+  }
+  pout[0]=0xF0|(charIn>>18);
+  pout[1]=0x80|((charIn>>12)&0x3F);
+  pout[2]=0x80|((charIn>>6)&0x3F);
+  pout[3]=0x80|(charIn&0x3F);
+  return 4;
 }
 
-static int utf8char(const char *ptr, unsigned short *charOut) // returns char length
+static int utf8char(const char *ptr, unsigned int *charOut) // returns char length
 {
   const unsigned char *p = (const unsigned char *)ptr;
   unsigned char tc = *p;
 
   if (tc < 128) 
   {
-    if (charOut) *charOut = (unsigned short) tc;
+    if (charOut) *charOut = tc;
     return 1;
   }
   else if (tc < 0xC2) // invalid chars (subsequent in sequence, or overlong which we disable for)
@@ -67,11 +75,11 @@ static int utf8char(const char *ptr, unsigned short *charOut) // returns char le
   {
     if (p[1] >= 0x80 && p[1] <= 0xC0 && p[2] >= 0x80 && p[2] <= 0xC0 && p[3] >= 0x80 && p[3] <= 0xC0)
     {
-      if (charOut) *charOut = (unsigned short)' '; // dont support 4 byte sequences yet(ever?)
+      if (charOut) *charOut = ((tc&7)<<18)|((p[1]&0x3F)<<12)|((p[2]&0x3F)<<6)|(p[3]&0x3F);
       return 4;
     }
   }  
-  if (charOut) *charOut = (unsigned short) tc;
+  if (charOut) *charOut = tc;
   return 1;  
 }
 
@@ -160,7 +168,37 @@ void LICE_CachedFont::SetFromHFont(HFONT font, int flags)
   }
 }
 
-bool LICE_CachedFont::RenderGlyph(unsigned short idx) // return TRUE if ok
+#define CHAR1_COMBINEABLE(x) (((x) >= 'a' && (x) <= 'z') || ((x) >= 'A' && (x) <= 'Z'))
+#define CHAR2_COMBINEABLE(x) ((x) >= 0x300 && (x) <= 0x36F)
+
+static bool DECODE_COMBINING(unsigned int *c, unsigned int *c2)
+{
+  const unsigned int c0 = *c;
+  if ((c0&0xFF000000) == 0x1000000) // encoded a-z+combining char
+  {
+    const unsigned int c1 = (c0>>16) & 0xFF;
+    const unsigned int c2v = c0 & 0xFFFF;
+    if (WDL_NORMALLY(c2v) && WDL_NORMALLY(CHAR1_COMBINEABLE(c1)))
+    {
+      WDL_ASSERT(CHAR2_COMBINEABLE(c2v));
+      *c2 = c2v;
+      *c = c1;
+      return true;
+    }
+  }
+  return false;
+}
+
+static void ENCODE_COMBINING(unsigned int *c, unsigned int c2)
+{
+  if (WDL_NOT_NORMALLY(*c > 127)) return;
+  // c2 typically 0x300..0x36F
+  // *c typically ASCII latin a-zA-Z
+  // need to not conflict with usable range of 10FFFF, which is 21 bits
+  *c = (1<<24) | ((*c << 16)&0xFF0000) | (c2&0xFFFF);
+}
+
+bool LICE_CachedFont::RenderGlyph(unsigned int idx) // return TRUE if ok
 {
   if (m_line_height >= ABSOLUTELY_NO_GLYPHS_HIGHER_THAN) return false;
 
@@ -213,13 +251,31 @@ bool LICE_CachedFont::RenderGlyph(unsigned short idx) // return TRUE if ok
   if (__1ifNT2if98==1) 
 #endif
   {
-    WCHAR tmpstr[2]={(WCHAR)idx,0};
-    ::DrawTextW(s_tempbitmap->getDC(),tmpstr,1,&r,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
+    WCHAR tmpstr[3];
+    unsigned int c2;
+    int l = 1;
+    if (idx >= 0x10000 && idx < 0x10FFFF)
+    {
+      tmpstr[0] = 0xD800 + (((idx-0x10000)>>10)&0x3FF);
+      tmpstr[1] = 0xDC00 + (((idx-0x10000)&0x3FF));
+      l++;
+    }
+    else
+    {
+      if (DECODE_COMBINING(&idx,&c2))
+      {
+        tmpstr[1] = (WCHAR) (c2&0xFFFF);
+        l++;
+      }
+      tmpstr[0] = (WCHAR) (idx&0xFFFF);
+    }
+
+    ::DrawTextW(s_tempbitmap->getDC(),tmpstr,l,&r,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
     advance=r.right;
     r.right += right_extra_pad+left_extra_pad;
     LICE_FillRect(s_tempbitmap,0,0,r.right,r.bottom,0,1.0f,LICE_BLIT_MODE_COPY);
     r.left+=left_extra_pad;
-    ::DrawTextW(s_tempbitmap->getDC(),tmpstr,1,&r,DT_SINGLELINE|DT_LEFT|DT_TOP|DT_NOPREFIX|DT_NOCLIP);
+    ::DrawTextW(s_tempbitmap->getDC(),tmpstr,l,&r,DT_SINGLELINE|DT_LEFT|DT_TOP|DT_NOPREFIX|DT_NOCLIP);
   }
   #if defined(WDL_SUPPORT_WIN9X)
   else
@@ -228,10 +284,17 @@ bool LICE_CachedFont::RenderGlyph(unsigned short idx) // return TRUE if ok
 
 #if !defined(_WIN32) || defined(WDL_SUPPORT_WIN9X)
   {
-    
-    char tmpstr[6]={(char)idx,0};
+    char tmpstr[8];
+    memset(tmpstr,0,sizeof(tmpstr));
 #ifndef _WIN32
-    if (idx>=128) utf8makechar(tmpstr,idx);
+    unsigned int c2;
+    if (DECODE_COMBINING(&idx,&c2))
+    {
+      tmpstr[0] = idx&127;
+      utf8makechar(tmpstr + 1, c2);
+    }
+    else if (idx>=128) utf8makechar(tmpstr,idx);
+    else tmpstr[0] = idx&127;
 #endif
     ::DrawText(s_tempbitmap->getDC(),tmpstr,-1,&r,DT_CALCRECT|DT_SINGLELINE|DT_NOPREFIX);
     advance=r.right;
@@ -522,7 +585,7 @@ public:
   }
 };
 
-LICE_CachedFont::charEnt *LICE_CachedFont::findChar(unsigned short c)
+LICE_CachedFont::charEnt *LICE_CachedFont::findChar(unsigned int c)
 {
   if (c<128) return m_lowchars+c;
   if (!m_extracharlist.GetSize()) return 0;
@@ -531,13 +594,9 @@ LICE_CachedFont::charEnt *LICE_CachedFont::findChar(unsigned short c)
   return (charEnt *)bsearch(&a,m_extracharlist.Get(),m_extracharlist.GetSize(),sizeof(charEnt),_charSortFunc);
 }
 
-bool LICE_CachedFont::DrawGlyph(LICE_IBitmap *bm, unsigned short c, 
+bool LICE_CachedFont::DrawGlyph(LICE_IBitmap *bm, const charEnt *ch,
                                 int xpos, int ypos, const RECT *clipR)
 {
-  charEnt *ch = findChar(c);
-
-  if (!ch) return false;
-
   if (m_flags&LICE_FONT_FLAG_VERTICAL) 
   {
     if ((m_flags&(LICE_FONT_FLAG_VERTICAL|LICE_FONT_FLAG_VERTICAL_BOTTOMUP)) == (LICE_FONT_FLAG_VERTICAL|LICE_FONT_FLAG_VERTICAL_BOTTOMUP))
@@ -733,9 +792,22 @@ static BOOL LICE_Text_HasUTF8(const char *_str)
       }
 
 
-static const char *adv_str(const char *str, int *strcnt, unsigned short *c)
+static const char *adv_str(const char *str, int *strcnt, unsigned int *c)
 {
   int charlen=utf8char(str, c);
+  if (charlen == 1 && CHAR1_COMBINEABLE(*c))
+  {
+    if (!strcnt || *strcnt < 0 || *strcnt >= 3)
+    {
+      unsigned int c2 = 0;
+      const int len2 = utf8char(str + charlen, &c2);
+      if (CHAR2_COMBINEABLE(c2))
+      {
+        charlen += len2;
+        ENCODE_COMBINING(c, c2);
+      }
+    }
+  }
   if (strcnt && *strcnt > 0) *strcnt=wdl_max(*strcnt-charlen, 0);
   return str+charlen;
 }
@@ -746,7 +818,7 @@ const char *LICE_CachedFont::NextWordBreak(const char *str, int strcnt, int w)
   const char *next_break=NULL;
   while (*str && strcnt)
   {
-    unsigned short c;
+    unsigned int c;
     str=adv_str(str, &strcnt, &c);
     if (c == '\n') return str;
     if (c != '\r')
@@ -769,6 +841,10 @@ int LICE_CachedFont::DrawTextImpl(LICE_IBitmap *bm, const char *str, int strcnt,
 {
   WDL_ASSERT((dtFlags & DT_SINGLELINE) || !(dtFlags & (DT_BOTTOM|DT_VCENTER))); // if DT_BOTTOM or DT_VCENTER used, must have DT_SINGLELINE
   if (!bm && !(dtFlags&DT_CALCRECT)) return 0;
+
+  // if DT_CALCRECT and DT_WORDBREAK, rect must be provided
+  WDL_ASSERT((dtFlags&(DT_CALCRECT|DT_WORDBREAK)) != (DT_CALCRECT|DT_WORDBREAK) ||
+    (rect && rect->right > rect->left && rect->bottom > rect->top));
 
   const int __sc = bm ? (int)bm->Extended(LICE_EXT_GET_SCALING,NULL) : 0;
   int bm_w = bm ? bm->getWidth() : 0;
@@ -797,11 +873,7 @@ int LICE_CachedFont::DrawTextImpl(LICE_IBitmap *bm, const char *str, int strcnt,
 
   if (dtFlags&DT_SINGLELINE) dtFlags &= ~DT_WORDBREAK;
 
-#ifndef _WIN32
-  const int lsadj = m_lsadj+3;
-#else
   const int lsadj = m_lsadj;
-#endif
 
   // if using line-spacing adjustments (m_lsadj), don't allow native rendering 
   // todo: split rendering up into invidual lines and DrawText calls
@@ -813,7 +885,8 @@ int LICE_CachedFont::DrawTextImpl(LICE_IBitmap *bm, const char *str, int strcnt,
       // swell does not support DT_WORDBREAK at the moment
       !(dtFlags & DT_WORDBREAK) &&
 #endif
-      !(dtFlags & LICE_DT_USEFGALPHA) &&
+      (!(dtFlags & LICE_DT_USEFGALPHA) || LICE_GETA(m_fg) == 255) &&
+      fabs(m_alpha-1.0) < 0.01 &&
       !(m_flags&LICE_FONT_FLAG_PRECALCALL) && !LICE_FONT_FLAGS_HAS_FX(m_flags) &&
       (!lsadj || (dtFlags&DT_SINGLELINE))) ||
       (m_line_height >= USE_NATIVE_RENDERING_FOR_FONTS_HIGHER_THAN) ) 
@@ -1056,7 +1129,7 @@ finish_up_native_render:
   int tcnt=strcnt;
   while (*tstr && tcnt)
   {
-    unsigned short c;
+    unsigned int c;
     tstr=adv_str(tstr, &tcnt, &c);
 
     if (c == '\r') continue;
@@ -1085,7 +1158,7 @@ finish_up_native_render:
     const char *next_break=NULL;
     while (*str && strcnt)
     {
-      unsigned short c;
+      unsigned int c;
       str=adv_str(str, &strcnt, &c);
 
       if (c == '\r') continue;
@@ -1191,6 +1264,8 @@ finish_up_native_render:
   RECT use_rect=*rect;
   int xpos=use_rect.left;
   int ypos=use_rect.top;
+  int orig_right=use_rect.right;
+  int orig_bott=use_rect.bottom;
 
   bool isVertRev = false;
   if ((m_flags&(LICE_FONT_FLAG_VERTICAL|LICE_FONT_FLAG_VERTICAL_BOTTOMUP)) == (LICE_FONT_FLAG_VERTICAL|LICE_FONT_FLAG_VERTICAL_BOTTOMUP))
@@ -1267,7 +1342,7 @@ finish_up_native_render:
   const char *next_break=NULL;
   while (*str && strcnt)
   {
-    unsigned short c;
+    unsigned int c;
     str=adv_str(str, &strcnt, &c);
 
     if (c == '\r') continue;
@@ -1294,12 +1369,12 @@ finish_up_native_render:
       }
     }
 
-    charEnt *ent = findChar(c);
+    const charEnt *ent = findChar(c);
     if (ent && ent->base_offset > 0 && ent->base_offset < m_cachestore.GetSize())
     {
       if (isVertRev) ypos -= ent->height;
 
-      bool drawn = DrawGlyph(bm,c,xpos,ypos,&use_rect);
+      bool drawn = DrawGlyph(bm,ent,xpos,ypos,&use_rect);
 
       if (m_flags&LICE_FONT_FLAG_VERTICAL)
       {
@@ -1328,7 +1403,7 @@ finish_up_native_render:
           }
           if (!next_break)
           {
-            next_break=NextWordBreak(str, strcnt, use_rect.bottom-ypos);
+            next_break=NextWordBreak(str, strcnt, orig_bott-ypos);
           }
         }
         else
@@ -1341,7 +1416,7 @@ finish_up_native_render:
           }
           if (!next_break)
           {
-            next_break=NextWordBreak(str, strcnt, use_rect.right-xpos);
+            next_break=NextWordBreak(str, strcnt, orig_right-xpos);
           }
         }
       }

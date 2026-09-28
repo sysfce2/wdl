@@ -15,7 +15,7 @@
 #include "../wdlcstring.h"
 
 #ifndef VALIDATE_TEXT_CHAR
-#define VALIDATE_TEXT_CHAR(thischar) ((thischar) >= 0 && (thischar >= 128 || isspace(thischar) || isgraph(thischar)) && !(thischar >= KEY_DOWN && thischar <= KEY_F12))
+#define VALIDATE_TEXT_CHAR(thischar) ((thischar) >= 0 && (thischar >= 128 || isspace_safe(thischar) || isgraph_safe(thischar)) && !(thischar >= KEY_DOWN && thischar <= KEY_F12))
 #endif
 
 
@@ -298,7 +298,7 @@ LRESULT WDL_CursesEditor::onMouseMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LP
           
           while (NULL != (url = strstr(url,"http://")))
           {
-            if (url != fs->Get() && url[-1] > 0 && isalnum(url[-1]))
+            if (url != fs->Get() && url[-1] > 0 && isalnum_safe(url[-1]))
             {
               url+=7;
             }
@@ -456,8 +456,8 @@ LRESULT WDL_CursesEditor::onMouseMessage(HWND hwnd, UINT uMsg, WPARAM wParam, LP
           int x1=WDL_utf8_charpos_to_bytepos(s->Get(),m_curs_x);
           int x2=x1+1;
           const char* p=s->Get();
-          while (x1 > 0 && p[x1-1] > 0 && (isalnum(p[x1-1]) || p[x1-1] == '_')) --x1;
-          while (x2 < s->GetLength() && p[x2] > 0 && (isalnum(p[x2]) || p[x2] == '_')) ++x2;
+          while (x1 > 0 && p[x1-1] > 0 && (isalnum_safe(p[x1-1]) || p[x1-1] == '_')) --x1;
+          while (x2 < s->GetLength() && p[x2] > 0 && (isalnum_safe(p[x2]) || p[x2] == '_')) ++x2;
           if (x2 > x1)
           {
             m_select_x1=WDL_utf8_bytepos_to_charpos(s->Get(),x1);
@@ -619,8 +619,7 @@ void WDL_CursesEditor::loadLines(FILE *fh)
     {
       char line[4096];
       line[0]=0;
-      fgets(line,sizeof(line),fh);
-      if (!line[0]) break;
+      if (!fgets(line,sizeof(line),fh) || !line[0]) break;
 
       if (!fs) fs = new WDL_FastString(line);
       else fs->Append(line);
@@ -1375,8 +1374,8 @@ int WDL_CursesEditor::search_line(const char *str, const WDL_FastString *line, i
     if ((s_search_mode&1) ? !strncmp(p+startx,str,srchlen) : !strnicmp(p+startx,str,srchlen))
     {
       if (!(s_search_mode&2)) return startx;
-      if ((startx==0 || p[startx-1]<0 || !isalnum(p[startx-1])) &&
-          (p[startx+srchlen]<=0 || !isalnum(p[startx+srchlen]))) return startx;
+      if ((startx==0 || p[startx-1]<0 || !isalnum_safe(p[startx-1])) &&
+          (p[startx+srchlen]<=0 || !isalnum_safe(p[startx+srchlen]))) return startx;
     }
   return -1;
 }
@@ -1507,8 +1506,8 @@ static int categorizeCharForWordNess(int c)
 {
   if (c >= 0 && c < 256)
   {
-    if (isspace(c)) return 0;
-    if (isalnum(c) || c == '_') return 1;
+    if (isspace_safe(c)) return 0;
+    if (isalnum_safe(c) || c == '_') return 1;
     if (c == ';') return 2; // I prefer this, since semicolons are somewhat special
   }
   return 3;
@@ -1536,7 +1535,13 @@ void WDL_CursesEditor::getLinesFromClipboard(WDL_FastString &buf, WDL_PtrList<co
       {
         char b[32];
         if (!*t) break;
-        WDL_MakeUTFChar(b,*t++,sizeof(b));
+        int ch = *t++;
+        if (ch >= 0xD800 && ch <= 0xD800 + 0x3FF && s>0 && *t >= 0xDC00 && *t <= 0xDC00 + 0x3FF)
+        {
+          ch = 0x10000 + ((ch-0xD800)<<10) + (*t++ - 0xDC00);
+          s--;
+        }
+        WDL_MakeUTFChar(b,ch,sizeof(b));
         buf.Append(b);
       }
 
@@ -1699,7 +1704,7 @@ int WDL_CursesEditor::onChar(int c)
       setCursor();
     break;
     case UI_STATE_SAVE_ON_CLOSE:
-      if (c>=0 && (isalnum(c) || isprint(c) || c==27))
+      if (c>=0 && (isalnum_safe(c) || isprint_safe(c) || c==27))
       {
         if (c == 27)
         {
@@ -1709,9 +1714,9 @@ int WDL_CursesEditor::onChar(int c)
           setCursor();
           return 0;
         }
-        if (toupper(c) == 'N' || toupper(c) == 'Y')
+        if (toupper_safe(c) == 'N' || toupper_safe(c) == 'Y')
         {
-          if (toupper(c) == 'Y')
+          if (toupper_safe(c) == 'Y')
           {
             if(updateFile())
             {
@@ -1732,10 +1737,10 @@ int WDL_CursesEditor::onChar(int c)
       }
     return 0;
     case UI_STATE_SAVE_AS_NEW:
-      if (c>=0 && (isalnum(c) || isprint(c) || c==27 || c == '\r' || c=='\n'))
+      if (c>=0 && (isalnum_safe(c) || isprint_safe(c) || c==27 || c == '\r' || c=='\n'))
       {
         m_ui_state=UI_STATE_NORMAL;
-        if (toupper(c) == 'N' || c == 27)
+        if (toupper_safe(c) == 'N' || c == 27)
         {
           draw();
           draw_message("Cancelled create new file.");
@@ -2155,17 +2160,23 @@ int WDL_CursesEditor::onChar(int c)
         if (CURSES_INSTANCE)
         {
 #ifdef CF_UNICODETEXT
-          const int l=(WDL_utf8_get_charlen(s_fake_clipboard.Get())+1)*sizeof(wchar_t);
-          HANDLE h=GlobalAlloc(GMEM_MOVEABLE,l);
-          wchar_t *t=(wchar_t*)GlobalLock(h);
-          if (t)
+          WCHAR tmpbuf[256];
+          WCHAR *p = WDL_utf8_to_utf16((const char *)s_fake_clipboard.Get(),tmpbuf,sizeof(tmpbuf),1);
+          if (WDL_NORMALLY(p))
           {
-            WDL_MBtoWideStr(t,s_fake_clipboard.Get(),l);
-            GlobalUnlock(h);
+            const int l=(wcslen(p)+1)*sizeof(WCHAR);
+            HANDLE h=GlobalAlloc(GMEM_MOVEABLE,l);
+            WCHAR *t=(WCHAR *)GlobalLock(h);
+            if (t)
+            {
+              memcpy(t,p,l);
+              GlobalUnlock(h);
+            }
+            OpenClipboard(CURSES_INSTANCE->m_hwnd);
+            EmptyClipboard();
+            SetClipboardData(CF_UNICODETEXT,h);
+            if (p != tmpbuf) free(p);
           }
-          OpenClipboard(CURSES_INSTANCE->m_hwnd);
-          EmptyClipboard();
-          SetClipboardData(CF_UNICODETEXT,h);
 #else
           int l=s_fake_clipboard.GetLength()+1;
           HANDLE h=GlobalAlloc(GMEM_MOVEABLE,l);

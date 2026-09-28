@@ -5,17 +5,18 @@
 
 // normally onlySec_name is NULL and returns NULL (and updates global state)
 // if onlySec_name is set, only loads/returns section in question and does not update global state.
-WDL_AssocArray<WDL_UINT64, char *> *WDL_LoadLanguagePack(const char *buf, const char *onlySec_name);
+WDL_KeyedArray<WDL_UINT64, char *> *WDL_LoadLanguagePack(const char *buf, const char *onlySec_name);
 
-WDL_AssocArray<WDL_UINT64, char *> *WDL_LoadLanguagePackInternal(const char *buf,
-    WDL_StringKeyedArray< WDL_AssocArray<WDL_UINT64, char *> * > *dest,
+WDL_KeyedArray<WDL_UINT64, char *> *WDL_LoadLanguagePackInternal(const char *buf,
+    WDL_StringKeyedArray< WDL_KeyedArray<WDL_UINT64, char *> * > *dest,
     const char *onlySec_name, // if set, will not touch dest
     bool include_commented_lines,
     bool no_escape_strings,
     WDL_StringKeyedArray<char *> *extra_metadata
     );
 
-WDL_AssocArray<WDL_UINT64, char *> *WDL_GetLangpackSection(const char *sec);
+WDL_KeyedArray<WDL_UINT64, char *> *WDL_GetLangpackSection(const char *sec);
+WDL_KeyedArray<WDL_UINT64, char *> *WDL_EnumLangpackSections(int idx, const char **secname);
 
 void WDL_SetLangpackFallbackEntry(const char *src_sec, WDL_UINT64 src_v, const char *dest_sec, WDL_UINT64 dest_v);
 
@@ -23,6 +24,7 @@ void WDL_SetLangpackFallbackEntry(const char *src_sec, WDL_UINT64 src_v, const c
 #define LOCALIZE_FLAG_NOCACHE 2     // must use this if the string passed is not a persistent static string, or if in another thread
 #define LOCALIZE_FLAG_PAIR 4        // one \0 in string needed -- this is not doublenull terminated but just a special case
 #define LOCALIZE_FLAG_DOUBLENULL 8  // doublenull terminated string
+#define LOCALIZE_FLAG_NOCOMMON 16
 
 
 #ifdef LOCALIZE_DISABLE
@@ -91,5 +93,9 @@ HWND __localizeDialog(HINSTANCE hInstance, const char * lpTemplate, HWND hwndPar
 #define __localizeCreateDialogParam(a,b,c,d,e) __localizeDialog(a,b,c,d,e,0)
 
 extern void (*localizePreInitDialogHook)(HWND hwndDlg);
+extern void (*localizePostInitDialogHook)(HWND hwndDlg);
+extern int localizeLastDialogResourceId; // valid only in localizePreInitDialogHook/localizePostInitDialogHook
+extern const char *localizeLastDialogResourceSub; // NULL or prefix
+
 
 #endif

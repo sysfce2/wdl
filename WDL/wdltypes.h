@@ -45,6 +45,8 @@ typedef intptr_t INT_PTR;
 typedef uintptr_t UINT_PTR;
 #endif
 #include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
 
 #if defined(__ppc__) || !defined(__cplusplus)
 typedef char WDL_bool;
@@ -190,6 +192,11 @@ typedef bool WDL_bool;
   #define WDL_NOT_NORMALLY(x) WDL_unlikely(x)
 #endif
 
+// asserts that buf1/buf2 do not overlap. must be the same type, also NULL or zero-sized buffers are assumed to never overlap
+#define WDL_ASSERT_NO_OVERLAP(buf1, buf1sz, buf2, buf2sz) \
+  WDL_ASSERT(!(buf1) || !(buf2) || (buf1sz)==0 || (buf2sz)==0 || (buf1) + (buf1sz) <= (buf2) || (buf1) >= (buf2) + (buf2sz))
+
+
 #if __GNUC__ >= 7 || __clang_major__ > 9
   #if __has_attribute(__fallthrough__)
     #define WDL_FALLTHROUGH __attribute__((__fallthrough__))
@@ -236,11 +243,8 @@ static WDL_bool WDL_STATICFUNC_UNUSED WDL_TICKS_IN_RANGE_ENDING_AT(WDL_TICKTYPE 
 typedef char wdl_assert_failed_unsigned_char[((char)-1) > 0 ? -1 : 1];
 #endif
 
-// wdl_log() / printf() wrapper. no-op on release builds
-#if !defined(_DEBUG) && !defined(WDL_LOG_ON_RELEASE)
-  static void WDL_STATICFUNC_UNUSED WDL_VARARG_WARN(printf,1,2) wdl_log(const char *format, ...) { }
-#elif defined(_WIN32)
-  static void WDL_STATICFUNC_UNUSED WDL_VARARG_WARN(printf,1,2) wdl_log(const char *format, ...)
+#ifdef _WIN32
+  static void WDL_STATICFUNC_UNUSED WDL_VARARG_WARN(printf,1,2) wdl_log_force(const char *format, ...)
   {
     int rv;
     va_list va;
@@ -255,7 +259,14 @@ typedef char wdl_assert_failed_unsigned_char[((char)-1) > 0 ? -1 : 1];
     OutputDebugStringA(tmp);
   }
 #else
-  #define wdl_log printf
+  #define wdl_log_force printf
+#endif
+
+// wdl_log() / printf() wrapper. no-op on release builds, otherwise maps to wdl_log_force
+#if !defined(_DEBUG) && !defined(WDL_LOG_ON_RELEASE)
+  static void WDL_STATICFUNC_UNUSED WDL_VARARG_WARN(printf,1,2) wdl_log(const char *format, ...) { }
+#else
+  #define wdl_log wdl_log_force
 #endif
 
 static void WDL_STATICFUNC_UNUSED wdl_bswap_copy(void *bout, const void *bin, size_t nelem, size_t elemsz)
@@ -334,5 +345,44 @@ static int WDL_STATICFUNC_UNUSED wdl_mem_load_int_be(const void *rd)
   return v;
 }
 
+#ifdef __cplusplus
+template<class T> static void wdl_mem_store(void *bout, T v) { memcpy(bout, &v, sizeof(v)); }
+template<class T> static void wdl_mem_store_le(void *bout, T v) { wdl_memcpy_le(bout, &v, 1, sizeof(v)); }
+template<class T> static void wdl_mem_store_be(void *bout, T v) { wdl_memcpy_be(bout, &v, 1, sizeof(v)); }
+template<class T> static T wdl_mem_load(const void *bin) { T v; memcpy(&v, bin, sizeof(v)); return v; }
+template<class T> static T wdl_mem_load_le(const void *bin) { T v; wdl_memcpy_le(&v, bin, 1, sizeof(v)); return v; }
+template<class T> static T wdl_mem_load_be(const void *bin) { T v; wdl_memcpy_be(&v, bin, 1, sizeof(v)); return v; }
+
+template<class T> inline int wdl_cmpfunc(const void *a, const void *b)
+{
+  if (*(const T *)a < *(const T *)b) return -1;
+  if (*(const T *)a > *(const T *)b) return 1;
+  return 0;
+}
+
+template<class T> inline int wdl_cmpfunc_rev(const void *a, const void *b)
+{
+  if (*(const T *)a > *(const T *)b) return -1;
+  if (*(const T *)a < *(const T *)b) return 1;
+  return 0;
+}
+
+template<class T> static void wdl_freefunc(T a) { free((void*)a); }
+template<class T> static void wdl_deletefunc(T a) { delete a; }
 
 #endif
+
+// avoid UB when these functions are passed signed char, etc
+static int WDL_STATICFUNC_UNUSED toupper_safe(int v) { return v >= 0 && v < 256 ? toupper(v) : v; }
+static int WDL_STATICFUNC_UNUSED tolower_safe(int v) { return v >= 0 && v < 256 ? tolower(v) : v; }
+static int WDL_STATICFUNC_UNUSED isalpha_safe(int v) { return v >= 0 && v < 256 && isalpha(v); }
+static int WDL_STATICFUNC_UNUSED isalnum_safe(int v) { return v >= 0 && v < 256 && isalnum(v); }
+static int WDL_STATICFUNC_UNUSED isupper_safe(int v) { return v >= 0 && v < 256 && isupper(v); }
+static int WDL_STATICFUNC_UNUSED islower_safe(int v) { return v >= 0 && v < 256 && islower(v); }
+static int WDL_STATICFUNC_UNUSED isspace_safe(int v) { return v >= 0 && v < 256 && isspace(v); }
+static int WDL_STATICFUNC_UNUSED isgraph_safe(int v) { return v >= 0 && v < 256 && isgraph(v); }
+static int WDL_STATICFUNC_UNUSED isdigit_safe(int v) { return v >= 0 && v < 256 && isdigit(v); }
+static int WDL_STATICFUNC_UNUSED isprint_safe(int v) { return v >= 0 && v < 256 && isprint(v); }
+
+#endif
+
