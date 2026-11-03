@@ -371,6 +371,7 @@ local long block_get2(block_t *block) {
 local size_t block_read(block_t *block, unsigned char *buf, size_t len) {
     size_t need = len;
     while (need) {
+        size_t take;
         if (block->left == 0) {
             /* Get a byte to update and step through the linked list as needed. */
             int got = block_get(block);
@@ -381,7 +382,7 @@ local size_t block_read(block_t *block, unsigned char *buf, size_t len) {
             need--;
             continue;
         }
-        size_t take = need > block->left ? block->left : need;
+        take = need > block->left ? block->left : need;
         memcpy(buf, block->next, take);
         block->next += take;
         block->left -= take;
@@ -413,6 +414,7 @@ local int block_skip(block_t *block, size_t n) {
 local char *block_central_name(block_t *block, set_t *set) {
     char *name = NULL;
     for (;;) {
+        unsigned flen, xlen, clen;
         if (block_end(block))
             /* At the end of the central directory (so far). */
             return NULL;
@@ -426,9 +428,9 @@ local char *block_central_name(block_t *block, set_t *set) {
         /* Go through the remaining fixed-length portion of the record,
         // extracting the lengths of the three variable-length fields. */
         block_skip(block, 24);
-        unsigned flen = (unsigned)block_get2(block);    /* file name length */
-        unsigned xlen = (unsigned)block_get2(block);    /* extra length */
-        unsigned clen = (unsigned)block_get2(block);    /* comment length */
+        flen = (unsigned)block_get2(block);    /* file name length */
+        xlen = (unsigned)block_get2(block);    /* extra length */
+        clen = (unsigned)block_get2(block);    /* comment length */
         if (block_skip(block, 12) == -1)
             /* Premature end of the record. */
             break;
@@ -502,14 +504,16 @@ extern int ZEXPORT zipAlreadyThere(zipFile file, char const *name) {
             // let this be and carry on. */
             set_free(&zip->set, there);
     }
-
+    {
     /* Return true if name is in the central directory. */
+    int found;
     size_t len = strlen(name);
     char *copy = set_alloc(&zip->set, NULL, len + 1);
     memcpy(copy, name, len + 1);
-    int found = set_found(&zip->set, copy);
+    found = set_found(&zip->set, copy);
     set_free(&zip->set, copy);
     return found;
+    }
 }
 
 
