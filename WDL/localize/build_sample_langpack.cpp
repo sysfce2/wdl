@@ -315,7 +315,8 @@ void processRCfile(FILE *fp, const char *dirprefix, const char *filename)
         exit(1);
       }
       sprintf(sname,"%s%s%s_%d",dirprefix?dirprefix:"",dirprefix?"_":"",second_tok[0] == 'M' ? "MENU" : "DLG",sec);
-      section_descs.Insert(sname,strdup(first_tok));
+      const char *usn = section_renames.Get(sname);
+      section_descs.Insert(usn ? usn : sname,strdup(first_tok));
     }
     else if (sname[0] && *second_tok && *first_tok)
     {
