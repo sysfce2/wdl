@@ -1267,7 +1267,8 @@ static EEL_F NSEEL_CGEN_CALL _eel_strsetchar2(void *opaque, INT_PTR np, EEL_F **
       if (l>=0 && l <= wl) 
       {
         const int flags=eel_getchar_flag((int) parms[3][0]);
-        if (l==wl) 
+        const int charlen = (flags&0xf);
+        if (l + charlen > wl)
         {
           if (wl > EEL_STRING_MAXUSERSTRING_LENGTH_HINT)
           {
@@ -1277,9 +1278,15 @@ static EEL_F NSEEL_CGEN_CALL _eel_strsetchar2(void *opaque, INT_PTR np, EEL_F **
           }
           else
           {
+            if (l < wl)
+            {
+              // write of multi-byte value that begins before end of string
+              // but grows the string, shorten and re-append
+              wr->SetLen(l);
+            }
             char buf[32];
             eel_setchar_do(flags,buf,parms[2][0]);
-            wr->AppendRaw(buf,flags&0xf);
+            wr->AppendRaw(buf,charlen);
           }
         }
         else
