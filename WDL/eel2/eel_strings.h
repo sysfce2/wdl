@@ -319,6 +319,7 @@ static int eel_validate_format_specifier(const char *fmt_in, char *typeOut,
 {
   const char *fmt = fmt_in+1;
   int state=0;
+  int precision = 0;
   if (fmt_in[0] != '%') return 0; // ugh passed a non-specifier
 
   *varOut_used = 0;
@@ -362,6 +363,8 @@ static int eel_validate_format_specifier(const char *fmt_in, char *typeOut,
     {
       *fmtOut++ = c; fmtOut_sz--;
       state|=4;
+      precision = precision * 10 + (c-'0');
+      if (precision > 1000) return 0; // invalid precision
     }
     else if (c == '{')
     {
